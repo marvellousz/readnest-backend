@@ -1,0 +1,18 @@
+[
+  {
+    "id": "feed_1757357885_c9371ecf",
+    "url": "http://feeds.bbci.co.uk/news/technology/rss.xml",
+    "title": "BBC News",
+    "description": "BBC News - Technology",
+    "last_updated": "2025-09-08T20:23:21.113593",
+    "is_active": false
+  },
+  {
+    "id": "feed_1757362848_f5c58bdf",
+    "url": "https://natashatherobot.preternatural.blog/rss",
+    "title": "Preternaturnal Blog",
+    "description": "undefined",
+    "last_updated": "2025-09-08T20:23:41.217246",
+    "is_active": true
+  }
+]
