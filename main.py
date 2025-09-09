@@ -628,31 +628,230 @@ def search_documents(query: str):
     return matching_documents
 
 @app.get("/api/search")
-async def search_papers(q: str = Query(...), top_k: int = 5):
+async def search_papers(q: str = Query(...), top_k: int = 5, source: str = "semantic_scholar"):
     """
-    Search for papers using Semantic Scholar (free API).
+    Search for papers using multiple academic APIs.
+    Sources: semantic_scholar, openalex, arxiv, pubmed
     """
-    url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={q}&limit={top_k}&fields=title,url,abstract"
-    
-    async with httpx.AsyncClient() as client:
-        r = await client.get(url)
-        if r.status_code != 200:
-            return {"results": []}
-        data = r.json()
-
     results = []
-    for paper in data.get("data", []):
-        # Some Semantic Scholar responses set abstract to None — guard against that
-        abstract = paper.get("abstract") or ""      # coerce None -> ""
-        # ensure title and url exist (fallback-safe)
-        title = paper.get("title") or "Untitled"
-        link = paper.get("url") or ""
-        results.append({
-            "title": title,
-            "summary": abstract[:500],  # truncate safely
-            "link": link
-        })
-
+    
+    if source == "semantic_scholar" or source == "all":
+        # Semantic Scholar API
+        try:
+            url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={q}&limit={top_k}&fields=title,url,abstract"
+            async with httpx.AsyncClient() as client:
+                r = await client.get(url)
+                if r.status_code == 200:
+                    data = r.json()
+                    for paper in data.get("data", []):
+                        abstract = paper.get("abstract") or ""
+                        title = paper.get("title") or "Untitled"
+                        link = paper.get("url") or ""
+                        results.append({
+                            "title": title,
+                            "summary": abstract[:500],
+                            "link": link,
+                            "source": "Semantic Scholar"
+                        })
+        except Exception as e:
+            print(f"Semantic Scholar error: {e}")
+    
+    if source == "openalex" or source == "all":
+        # OpenAlex API - following their best practices
+        try:
+            import urllib.parse
+            encoded_query = urllib.parse.quote(q)
+            # Use proper email for polite pool and better rate limits
+            url = f"https://api.openalex.org/works?search={encoded_query}&per_page={top_k}&mailto=readnest@example.com"
+            print(f"OpenAlex URL: {url}")
+            async with httpx.AsyncClient() as client:
+                r = await client.get(url)
+                print(f"OpenAlex response status: {r.status_code}")
+                if r.status_code == 200:
+                    data = r.json()
+                    print(f"OpenAlex found {len(data.get('results', []))} results")
+                    for work in data.get("results", []):
+                        # Extract abstract - OpenAlex uses abstract_inverted_index format
+                        abstract_text = ""
+                        if work.get("abstract_inverted_index"):
+                            # Convert inverted index to readable text
+                            abstract = work["abstract_inverted_index"]
+                            words = []
+                            for word, positions in abstract.items():
+                                for pos in positions:
+                                    words.append((pos, word))
+                            words.sort()
+                            abstract_text = " ".join([word for pos, word in words])
+                        elif work.get("abstract"):
+                            # Fallback to direct abstract if available
+                            abstract_text = work["abstract"]
+                        
+                        title = work.get("title", "Untitled")
+                        
+                        # Get best available link following OpenAlex priority
+                        link = ""
+                        if work.get("open_access", {}).get("oa_url"):
+                            # Open access PDF link (best option)
+                            link = work["open_access"]["oa_url"]
+                        elif work.get("primary_location", {}).get("landing_page_url"):
+                            # Publisher landing page
+                            link = work["primary_location"]["landing_page_url"]
+                        elif work.get("doi"):
+                            # DOI link
+                            link = f"https://doi.org/{work['doi']}"
+                        elif work.get("id"):
+                            # OpenAlex page as fallback
+                            link = work["id"]
+                        
+                        # Get publication year and venue information
+                        pub_year = work.get("publication_year", "")
+                        venue = work.get("primary_location", {}).get("source", {}).get("display_name", "")
+                        
+                        # Create enhanced title with year and venue
+                        title_parts = [title]
+                        if pub_year:
+                            title_parts.append(f"({pub_year})")
+                        if venue:
+                            title_parts.append(f"- {venue}")
+                        
+                        enhanced_title = " ".join(title_parts)
+                        
+                        results.append({
+                            "title": enhanced_title,
+                            "summary": abstract_text[:500] if abstract_text else "No abstract available",
+                            "link": link,
+                            "source": "OpenAlex"
+                        })
+                else:
+                    print(f"OpenAlex error: {r.status_code} - {r.text}")
+        except Exception as e:
+            print(f"OpenAlex error: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    if source == "arxiv" or source == "all":
+        # arXiv API (no key required) - using correct URL format
+        try:
+            # Use HTTPS and proper URL encoding for arXiv API
+            import urllib.parse
+            encoded_query = urllib.parse.quote(f"all:{q}")
+            url = f"https://export.arxiv.org/api/query?search_query={encoded_query}&start=0&max_results={top_k}&sortBy=relevance&sortOrder=descending"
+            print(f"arXiv URL: {url}")
+            async with httpx.AsyncClient() as client:
+                r = await client.get(url)
+                print(f"arXiv response status: {r.status_code}")
+                if r.status_code == 200:
+                    # Parse XML response using the correct namespace
+                    from xml.etree import ElementTree as ET
+                    root = ET.fromstring(r.text)
+                    
+                    # Find all entries using the correct namespace
+                    entries = root.findall('.//{http://www.w3.org/2005/Atom}entry')
+                    print(f"arXiv found {len(entries)} results")
+                    
+                    for entry in entries:
+                        # Extract title
+                        title_elem = entry.find('.//{http://www.w3.org/2005/Atom}title')
+                        title = title_elem.text.strip() if title_elem is not None and title_elem.text else "Untitled"
+                        
+                        # Extract summary/abstract
+                        summary_elem = entry.find('.//{http://www.w3.org/2005/Atom}summary')
+                        summary = summary_elem.text.strip() if summary_elem is not None and summary_elem.text else "No abstract available"
+                        
+                        # Extract arXiv ID and create proper link
+                        id_elem = entry.find('.//{http://www.w3.org/2005/Atom}id')
+                        arxiv_id = ""
+                        if id_elem is not None and id_elem.text:
+                            # Extract arXiv ID from URL like "http://arxiv.org/abs/hep-ex/0307015"
+                            arxiv_id = id_elem.text.split('/')[-1]
+                        
+                        # Create proper arXiv link
+                        link = f"http://arxiv.org/abs/{arxiv_id}" if arxiv_id else ""
+                        
+                        # Get publication date
+                        published_elem = entry.find('.//{http://www.w3.org/2005/Atom}published')
+                        pub_date = ""
+                        if published_elem is not None and published_elem.text:
+                            pub_date = published_elem.text[:4]  # Extract year
+                        year_suffix = f" ({pub_date})" if pub_date else ""
+                        
+                        # Get authors
+                        authors = []
+                        for author in entry.findall('.//{http://www.w3.org/2005/Atom}author'):
+                            name_elem = author.find('.//{http://www.w3.org/2005/Atom}name')
+                            if name_elem is not None and name_elem.text:
+                                authors.append(name_elem.text.strip())
+                        
+                        author_text = f" by {', '.join(authors[:3])}" if authors else ""
+                        if len(authors) > 3:
+                            author_text += f" et al."
+                        
+                        results.append({
+                            "title": title + year_suffix + author_text,
+                            "summary": summary[:500],
+                            "link": link,
+                            "source": "arXiv"
+                        })
+                else:
+                    print(f"arXiv error: {r.status_code} - {r.text}")
+        except Exception as e:
+            print(f"arXiv error: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    if source == "pubmed" or source == "all":
+        # PubMed API (no key required for basic search)
+        try:
+            # First search for PMIDs
+            import urllib.parse
+            encoded_query = urllib.parse.quote(q)
+            search_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term={encoded_query}&retmax={top_k}&retmode=json"
+            print(f"PubMed search URL: {search_url}")
+            async with httpx.AsyncClient() as client:
+                r = await client.get(search_url)
+                if r.status_code == 200:
+                    search_data = r.json()
+                    pmids = search_data.get("esearchresult", {}).get("idlist", [])
+                    print(f"PubMed found {len(pmids)} PMIDs")
+                    
+                    if pmids:
+                        # Get details for each PMID
+                        pmids_str = ",".join(pmids)
+                        fetch_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id={pmids_str}&retmode=xml"
+                        
+                        r2 = await client.get(fetch_url)
+                        if r2.status_code == 200:
+                            # Parse XML response
+                            from xml.etree import ElementTree as ET
+                            root = ET.fromstring(r2.text)
+                            
+                            articles = root.findall('.//PubmedArticle')
+                            for article in articles:
+                                title_elem = article.find('.//ArticleTitle')
+                                title = title_elem.text if title_elem is not None else "Untitled"
+                                
+                                abstract_elem = article.find('.//AbstractText')
+                                abstract = abstract_elem.text if abstract_elem is not None else "No abstract available"
+                                
+                                pmid_elem = article.find('.//PMID')
+                                pmid = pmid_elem.text if pmid_elem is not None else ""
+                                link = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else ""
+                                
+                                # Get publication year
+                                year_elem = article.find('.//PubDate/Year')
+                                pub_year = year_elem.text if year_elem is not None else ""
+                                year_suffix = f" ({pub_year})" if pub_year else ""
+                                
+                                results.append({
+                                    "title": title + year_suffix,
+                                    "summary": abstract[:500],
+                                    "link": link,
+                                    "source": "PubMed"
+                                })
+        except Exception as e:
+            print(f"PubMed error: {e}")
+            import traceback
+            traceback.print_exc()
 
     return {"results": results}
 
@@ -684,4 +883,47 @@ async def run_scholar_agent(payload: dict):
     except Exception as e:
         tb = traceback.format_exc()
         print("scholar_agent endpoint error:", tb)
+        raise HTTPException(status_code=500, detail=str(e))
+
+class ChatRequest(BaseModel):
+    message: str
+    conversation_history: List[dict] = []
+
+@app.post("/api/chat")
+async def chat_with_ai(request: ChatRequest):
+    """
+    Simple AI chat endpoint using Groq API directly
+    """
+    try:
+        from langchain_groq import ChatGroq
+        
+        # Initialize Groq client using langchain_groq (same as scholar_agent)
+        llm = ChatGroq(
+            model="llama-3.1-8b-instant",
+            temperature=0.7,
+            groq_api_key=os.getenv("GROQ_API_KEY"),
+        )
+        
+        # Build conversation context
+        conversation_context = "You are a helpful AI assistant. You can help with general questions, explanations, creative tasks, and casual conversation. Be friendly, informative, and concise.\n\n"
+        
+        # Add conversation history (last 10 messages)
+        for msg in request.conversation_history[-10:]:
+            if msg.get('role') == 'user':
+                conversation_context += f"User: {msg['content']}\n"
+            elif msg.get('role') == 'assistant':
+                conversation_context += f"Assistant: {msg['content']}\n"
+        
+        # Add current message
+        conversation_context += f"User: {request.message}\nAssistant:"
+        
+        # Get response from Groq
+        response = llm.invoke(conversation_context)
+        ai_response = response.content
+        
+        return {"response": ai_response}
+        
+    except Exception as e:
+        tb = traceback.format_exc()
+        print("chat endpoint error:", tb)
         raise HTTPException(status_code=500, detail=str(e))

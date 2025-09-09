@@ -12,15 +12,15 @@
     "url": "https://natashatherobot.preternatural.blog/rss",
     "title": "Preternaturnal Blog",
     "description": "undefined",
-    "last_updated": "2025-09-09T16:12:13.900526",
-    "is_active": false
+    "last_updated": "2025-09-09T21:10:52.515316",
+    "is_active": true
   },
   {
     "id": "feed_1757414835_b3f62069",
     "url": "https://transferlab.ai/index.xml",
     "title": "mine",
     "description": "All updates by the TransferLab team",
-    "last_updated": "2025-09-09T21:28:16.767820",
+    "last_updated": "2025-09-09T21:10:53.507805",
     "is_active": true
   }
 ]
