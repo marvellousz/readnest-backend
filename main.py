@@ -1,7 +1,8 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
+from scholar_agent import scholar_agent
 import json
 import os
 from datetime import datetime
@@ -12,6 +13,8 @@ from bs4 import BeautifulSoup
 import PyPDF2
 import docx
 import io
+import httpx
+import traceback, json
 
 app = FastAPI(title="ReadNest Backend", version="1.0.0")
 
@@ -623,3 +626,62 @@ def search_documents(query: str):
             matching_documents.append(document)
     
     return matching_documents
+
+@app.get("/api/search")
+async def search_papers(q: str = Query(...), top_k: int = 5):
+    """
+    Search for papers using Semantic Scholar (free API).
+    """
+    url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={q}&limit={top_k}&fields=title,url,abstract"
+    
+    async with httpx.AsyncClient() as client:
+        r = await client.get(url)
+        if r.status_code != 200:
+            return {"results": []}
+        data = r.json()
+
+    results = []
+    for paper in data.get("data", []):
+        # Some Semantic Scholar responses set abstract to None — guard against that
+        abstract = paper.get("abstract") or ""      # coerce None -> ""
+        # ensure title and url exist (fallback-safe)
+        title = paper.get("title") or "Untitled"
+        link = paper.get("url") or ""
+        results.append({
+            "title": title,
+            "summary": abstract[:500],  # truncate safely
+            "link": link
+        })
+
+
+    return {"results": results}
+
+@app.post("/api/scholar-agent")
+async def run_scholar_agent(payload: dict):
+    """
+    payload: {"user_prompt": "...", "papers": [...]}
+    """
+    try:
+        # invoke the compiled graph
+        result = scholar_agent.invoke({
+            "user_prompt": payload.get("user_prompt", ""),
+            "papers": payload.get("papers", [])
+        })
+
+        # result should be a dict with 'results'
+        if isinstance(result, dict):
+            results = result.get("results", [])
+            # return normalized response (include error/raw if present)
+            return {"results": results, "error": result.get("error"), "raw": result.get("raw")}
+        else:
+            # try parse if it's a string (rare)
+            try:
+                parsed = json.loads(result)
+                return {"results": parsed if isinstance(parsed, list) else [], "raw": result}
+            except Exception:
+                return {"results": [], "raw": str(result)}
+
+    except Exception as e:
+        tb = traceback.format_exc()
+        print("scholar_agent endpoint error:", tb)
+        raise HTTPException(status_code=500, detail=str(e))
