@@ -752,5 +752,31 @@
     "content": "Building an AI-powered Poem Generator in Swift\nBefore Large Language Models (LLMs) became so widely used in the outbreak ChatGPT product, they were actually tested as super powerful completion machines. Based on just a simple prompt such as \u201cAnd the cow jumped over the moon\u201d for example, the LLM could complete it into a full original poem following in the pattern of the famous \"Hey, diddle, diddle,\" nursery rhyme by Mother Goose. It achieves this by generating the next most likely word (or \"token\" to be more precise) based on all the training data it has processed, which can be as vast as the entire internet.\nHowever, the LLM\u2019s standalone completion functionality by itself was not found as usable in that state. Instead, OpenAI trained a new model (a brilliant move, in retrospect) with the help of thousands of overseas human workers to apply the completion functionality of the LLM in a User-Assistant conversation format. This chat interface became the breakout product of LLMs.\nKnowing t",
     "author": "",
     "tags": []
+  },
+  {
+    "id": "article_1757399124_1eeadb93",
+    "title": "It's taken three years to recover from China hack, election watchdog says",
+    "source": "BBC News",
+    "snippet": "In the first interview about the hack, the commission's new boss admits that huge mistakes were made, but says the organisation is now secure.",
+    "date": "2025-09-08",
+    "type": "rss",
+    "url": "https://www.bbc.com/news/articles/c80gl8yvj9go?at_medium=RSS&at_campaign=rss",
+    "feed_id": "feed_1757399124_6f86707d",
+    "content": "In the first interview about the hack, the commission's new boss admits that huge mistakes were made, but says the organisation is now secure.",
+    "author": "",
+    "tags": []
+  },
+  {
+    "id": "article_1757399124_9f52e6e0",
+    "title": "Nepal lifts social media ban after 19 killed in protests",
+    "source": "BBC News",
+    "snippet": "Thousands had taken to the streets demanding that the government lift the ban and tackle corruption.",
+    "date": "2025-09-09",
+    "type": "rss",
+    "url": "https://www.bbc.com/news/articles/cp98n1eg443o?at_medium=RSS&at_campaign=rss",
+    "feed_id": "feed_1757399124_6f86707d",
+    "content": "Thousands had taken to the streets demanding that the government lift the ban and tackle corruption.",
+    "author": "",
+    "tags": []
   }
 ]

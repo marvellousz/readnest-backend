@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
@@ -9,6 +9,9 @@ import uuid
 import feedparser
 import requests
 from bs4 import BeautifulSoup
+import PyPDF2
+import docx
+import io
 
 app = FastAPI(title="ReadNest Backend", version="1.0.0")
 
@@ -201,9 +204,19 @@ class FeedCreate(BaseModel):
     url: str
     name: str
 
+class Document(BaseModel):
+    id: str
+    name: str
+    type: str  # 'pdf' or 'doc'
+    size: int
+    upload_date: str
+    content: Optional[str] = None
+    status: str = "ready"  # 'uploading', 'processing', 'ready', 'error'
+
 # Storage files
 FEEDS_FILE = "feed_subscriptions.json"
 ARTICLES_FILE = "articles.json"
+DOCUMENTS_FILE = "documents.json"
 
 def load_feed_subscriptions() -> List[FeedSubscription]:
     """Load feed subscriptions from local JSON file"""
@@ -236,6 +249,74 @@ def save_articles(articles: List[Article]):
     """Save articles to local JSON file"""
     with open(ARTICLES_FILE, 'w') as f:
         json.dump([article.dict() for article in articles], f, indent=2)
+
+def load_documents() -> List[Document]:
+    """Load documents from local JSON file"""
+    if os.path.exists(DOCUMENTS_FILE):
+        try:
+            with open(DOCUMENTS_FILE, 'r') as f:
+                data = json.load(f)
+                return [Document(**doc) for doc in data]
+        except Exception:
+            return []
+    return []
+
+def save_documents(documents: List[Document]):
+    """Save documents to local JSON file"""
+    with open(DOCUMENTS_FILE, 'w') as f:
+        json.dump([doc.dict() for doc in documents], f, indent=2)
+
+def extract_text_from_pdf(file_content: bytes) -> str:
+    """Extract text from PDF file"""
+    try:
+        pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_content))
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() + "\n"
+        return text.strip()
+    except Exception as e:
+        raise Exception(f"Failed to extract text from PDF: {str(e)}")
+
+def extract_text_from_docx(file_content: bytes) -> str:
+    """Extract text from DOCX file"""
+    try:
+        doc = docx.Document(io.BytesIO(file_content))
+        text = ""
+        for paragraph in doc.paragraphs:
+            text += paragraph.text + "\n"
+        return text.strip()
+    except Exception as e:
+        raise Exception(f"Failed to extract text from DOCX: {str(e)}")
+
+def process_document(file: UploadFile) -> Document:
+    """Process uploaded document and extract text"""
+    # Read file content
+    file_content = file.file.read()
+    
+    # Determine file type
+    file_type = "pdf" if file.content_type == "application/pdf" else "doc"
+    
+    # Extract text based on file type
+    try:
+        if file_type == "pdf":
+            content = extract_text_from_pdf(file_content)
+        else:  # docx
+            content = extract_text_from_docx(file_content)
+    except Exception as e:
+        raise Exception(f"Failed to process document: {str(e)}")
+    
+    # Create document object
+    document = Document(
+        id=f"doc_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:8]}",
+        name=file.filename,
+        type=file_type,
+        size=len(file_content),
+        upload_date=datetime.now().isoformat(),
+        content=content,
+        status="ready"
+    )
+    
+    return document
 
 def parse_rss_feed(feed_url: str, custom_name: str = None) -> tuple[FeedSubscription, List[Article]]:
     """Parse RSS feed and return subscription info and articles"""
@@ -466,3 +547,79 @@ def search_articles(query: str):
             matching_articles.append(article)
     
     return matching_articles
+
+# Document API endpoints
+@app.get("/api/documents", response_model=List[Document])
+def get_all_documents():
+    """Get all uploaded documents"""
+    documents = load_documents()
+    # Sort by upload_date descending
+    documents.sort(key=lambda x: x.upload_date, reverse=True)
+    return documents
+
+@app.get("/api/documents/{document_id}", response_model=Document)
+def get_document(document_id: str):
+    """Get a specific document"""
+    documents = load_documents()
+    document = next((d for d in documents if d.id == document_id), None)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return document
+
+@app.post("/api/documents/upload", response_model=Document)
+def upload_document(file: UploadFile = File(...), name: str = Form(...)):
+    """Upload and process a document"""
+    # Validate file type
+    if file.content_type not in ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"]:
+        raise HTTPException(status_code=400, detail="Only PDF and DOCX files are supported")
+    
+    # Validate file size (10MB limit)
+    file.file.seek(0, 2)  # Seek to end
+    file_size = file.file.tell()
+    file.file.seek(0)  # Reset to beginning
+    
+    if file_size > 10 * 1024 * 1024:  # 10MB
+        raise HTTPException(status_code=400, detail="File size must be less than 10MB")
+    
+    try:
+        # Process the document
+        document = process_document(file)
+        
+        # Save to storage
+        documents = load_documents()
+        documents.append(document)
+        save_documents(documents)
+        
+        return document
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/documents/{document_id}")
+def delete_document(document_id: str):
+    """Delete a document"""
+    documents = load_documents()
+    document = next((d for d in documents if d.id == document_id), None)
+    
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    # Remove document
+    documents = [d for d in documents if d.id != document_id]
+    save_documents(documents)
+    
+    return {"message": "Document deleted successfully"}
+
+@app.get("/api/documents/search/{query}")
+def search_documents(query: str):
+    """Search documents by name or content"""
+    documents = load_documents()
+    query_lower = query.lower()
+    
+    matching_documents = []
+    for document in documents:
+        if (query_lower in document.name.lower() or 
+            query_lower in (document.content or "").lower()):
+            matching_documents.append(document)
+    
+    return matching_documents
