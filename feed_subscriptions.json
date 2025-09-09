@@ -4,15 +4,23 @@
     "url": "http://feeds.bbci.co.uk/news/technology/rss.xml",
     "title": "BBC News",
     "description": "BBC News - Technology",
-    "last_updated": "2025-09-09T06:47:18.316172",
-    "is_active": true
+    "last_updated": "2025-09-09T16:12:10.436162",
+    "is_active": false
   },
   {
     "id": "feed_1757362848_f5c58bdf",
     "url": "https://natashatherobot.preternatural.blog/rss",
     "title": "Preternaturnal Blog",
     "description": "undefined",
-    "last_updated": "2025-09-09T06:47:19.608557",
+    "last_updated": "2025-09-09T16:12:13.900526",
+    "is_active": false
+  },
+  {
+    "id": "feed_1757414835_b3f62069",
+    "url": "https://transferlab.ai/index.xml",
+    "title": "mine",
+    "description": "All updates by the TransferLab team",
+    "last_updated": "2025-09-09T21:28:16.767820",
     "is_active": true
   }
 ]
