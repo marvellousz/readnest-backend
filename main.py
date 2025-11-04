@@ -1,8 +1,9 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from scholar_agent import scholar_agent
+from hybrid_service import hybrid_service
 import json
 import os
 from datetime import datetime
@@ -15,6 +16,7 @@ import docx
 import io
 import httpx
 import traceback, json
+from supabase_config import supabase
 
 app = FastAPI(title="ReadNest Backend", version="1.0.0")
 
@@ -36,6 +38,7 @@ class JournalEntry(BaseModel):
     updated_at: str
     word_count: int
     keywords: Optional[dict] = {}
+    user_id: Optional[str] = None
 
 class JournalCreate(BaseModel):
     title: str
@@ -45,40 +48,80 @@ class JournalUpdate(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
 
-# In-memory storage (replace with database later)
-JOURNALS_FILE = "journals.json"
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
 
-def load_journals() -> List[JournalEntry]:
-    """Load journals from local JSON file"""
-    if os.path.exists(JOURNALS_FILE):
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+def get_current_user(authorization: Optional[str] = Header(None)):
+    """Validate Supabase JWT from Authorization: Bearer <token> and return user dict."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        # Ensure subsequent PostgREST calls run under this user's RLS context
         try:
-            with open(JOURNALS_FILE, 'r') as f:
-                data = json.load(f)
-                return [JournalEntry(**entry) for entry in data]
+            supabase.postgrest.auth(token)
         except Exception:
-            return []
-    return []
+            pass
+        user_resp = supabase.auth.get_user(token)
+        user = user_resp.user
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return {"id": user.id, "email": user.email}
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
-def save_journals(journals: List[JournalEntry]):
-    """Save journals to local JSON file"""
-    with open(JOURNALS_FILE, 'w') as f:
-        json.dump([journal.dict() for journal in journals], f, indent=2)
+# Using hybrid service (Supabase + JSON fallback)
 
 def extract_keywords(text: str, top_n: int = 30) -> dict:
-    """Extract keywords from text"""
+    """Extract meaningful keywords from text, filtering out common stop words"""
     if not text:
         return {}
     
     import re
-    # Simple tokenization and frequency counting
-    tokens = re.sub(r'[^\w\s]', ' ', text.lower()).split()
-    tokens = [t for t in tokens if len(t) > 2]  # Filter short words
     
+    # Common stop words to filter out
+    stop_words = {
+        'a', 'an', 'and', 'are', 'as', 'at', 'be', 'been', 'by', 'for', 'from',
+        'has', 'he', 'in', 'is', 'it', 'its', 'of', 'on', 'that', 'the', 'to',
+        'was', 'were', 'will', 'with', 'the', 'this', 'but', 'they', 'have',
+        'had', 'what', 'said', 'each', 'which', 'their', 'time', 'will', 'about',
+        'if', 'up', 'out', 'many', 'then', 'them', 'these', 'so', 'some', 'her',
+        'would', 'make', 'like', 'into', 'him', 'has', 'two', 'more', 'write',
+        'go', 'see', 'number', 'no', 'way', 'could', 'people', 'my', 'than',
+        'first', 'been', 'call', 'who', 'oil', 'sit', 'now', 'find', 'down',
+        'day', 'did', 'get', 'come', 'made', 'may', 'part', 'new', 'save',
+        'entry', 'entries', 'note', 'notes', 'journal', 'journals', 'read',
+        'reading', 'text', 'content', 'title', 'keyword', 'keywords'
+    }
+    
+    # Tokenize and clean text
+    tokens = re.sub(r'[^\w\s]', ' ', text.lower()).split()
+    
+    # Filter: keep only words that are:
+    # - Longer than 3 characters (more meaningful)
+    # - Not in stop words list
+    # - Not pure numbers
+    tokens = [
+        t for t in tokens 
+        if len(t) > 3 
+        and t not in stop_words 
+        and not t.isdigit()
+    ]
+    
+    if not tokens:
+        return {}
+    
+    # Count frequency
     freq = {}
     for token in tokens:
         freq[token] = freq.get(token, 0) + 1
     
-    # Return top N keywords
+    # Return top N keywords sorted by frequency
     sorted_keywords = sorted(freq.items(), key=lambda x: x[1], reverse=True)[:top_n]
     return dict(sorted_keywords)
 
@@ -88,97 +131,76 @@ def read_root():
 
 # Journal API endpoints
 @app.get("/api/journals", response_model=List[JournalEntry])
-def get_all_journals():
+def get_all_journals(current_user: dict = Depends(get_current_user)):
     """Get all journal entries"""
-    journals = load_journals()
-    # Sort by updated_at descending
-    journals.sort(key=lambda x: x.updated_at, reverse=True)
-    return journals
+    return hybrid_service.get_all_journals(user_id=current_user["id"])
 
 @app.get("/api/journals/{journal_id}", response_model=JournalEntry)
-def get_journal(journal_id: str):
+def get_journal(journal_id: str, current_user: dict = Depends(get_current_user)):
     """Get a specific journal entry"""
-    journals = load_journals()
-    journal = next((j for j in journals if j.id == journal_id), None)
+    journal = hybrid_service.get_journal(journal_id)
     if not journal:
+        raise HTTPException(status_code=404, detail="Journal not found")
+    # RLS prevents cross-user reads from DB; add explicit check for JSON fallback
+    if getattr(journal, "user_id", None) and journal.user_id != current_user["id"]:
         raise HTTPException(status_code=404, detail="Journal not found")
     return journal
 
 @app.post("/api/journals", response_model=JournalEntry)
-def create_journal(journal_data: JournalCreate):
+def create_journal(journal_data: JournalCreate, current_user: dict = Depends(get_current_user)):
     """Create a new journal entry"""
-    now = datetime.now().isoformat()
-    journal_id = f"j_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:8]}"
-    
     # Calculate word count and extract keywords
     word_count = len(journal_data.content.split()) if journal_data.content else 0
     keywords = extract_keywords(journal_data.content)
     
-    new_journal = JournalEntry(
-        id=journal_id,
-        title=journal_data.title,
-        content=journal_data.content,
-        created_at=now,
-        updated_at=now,
-        word_count=word_count,
-        keywords=keywords
-    )
+    journal_dict = {
+        'title': journal_data.title,
+        'content': journal_data.content,
+        'word_count': word_count,
+        'keywords': keywords,
+        'user_id': current_user["id"]
+    }
     
-    journals = load_journals()
-    journals.append(new_journal)
-    save_journals(journals)
+    new_journal = hybrid_service.create_journal(journal_dict)
+    if not new_journal:
+        raise HTTPException(status_code=500, detail="Failed to create journal")
     
     return new_journal
 
 @app.put("/api/journals/{journal_id}", response_model=JournalEntry)
-def update_journal(journal_id: str, journal_data: JournalUpdate):
+def update_journal(journal_id: str, journal_data: JournalUpdate, current_user: dict = Depends(get_current_user)):
     """Update an existing journal entry"""
-    journals = load_journals()
-    journal = next((j for j in journals if j.id == journal_id), None)
-    if not journal:
-        raise HTTPException(status_code=404, detail="Journal not found")
+    update_dict = {}
     
     # Update fields if provided
     if journal_data.title is not None:
-        journal.title = journal_data.title
+        update_dict['title'] = journal_data.title
     if journal_data.content is not None:
-        journal.content = journal_data.content
+        update_dict['content'] = journal_data.content
+        update_dict['word_count'] = len(journal_data.content.split())
+        update_dict['keywords'] = extract_keywords(journal_data.content)
     
-    # Update metadata
-    journal.updated_at = datetime.now().isoformat()
-    journal.word_count = len(journal.content.split()) if journal.content else 0
-    journal.keywords = extract_keywords(journal.content)
+    updated_journal = hybrid_service.update_journal(journal_id, update_dict)
+    if not updated_journal:
+        raise HTTPException(status_code=404, detail="Journal not found")
+    if getattr(updated_journal, "user_id", None) and updated_journal.user_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Forbidden")
     
-    save_journals(journals)
-    return journal
+    return updated_journal
 
 @app.delete("/api/journals/{journal_id}")
-def delete_journal(journal_id: str):
+def delete_journal(journal_id: str, current_user: dict = Depends(get_current_user)):
     """Delete a journal entry"""
-    journals = load_journals()
-    journal = next((j for j in journals if j.id == journal_id), None)
-    if not journal:
+    success = hybrid_service.delete_journal(journal_id)
+    if not success:
         raise HTTPException(status_code=404, detail="Journal not found")
-    
-    journals = [j for j in journals if j.id != journal_id]
-    save_journals(journals)
     
     return {"message": "Journal deleted successfully"}
 
 @app.get("/api/journals/search/{query}")
-def search_journals(query: str):
+def search_journals(query: str, current_user: dict = Depends(get_current_user)):
     """Search journals by title or content"""
-    journals = load_journals()
-    query_lower = query.lower()
-    
-    matching_journals = []
-    for journal in journals:
-        if (query_lower in journal.title.lower() or 
-            query_lower in journal.content.lower() or
-            any(query_lower in keyword.lower() for keyword in journal.keywords.keys())):
-            matching_journals.append(journal)
-    
-    return matching_journals
+    return hybrid_service.search_journals(query, user_id=current_user["id"])
 
 # RSS Feed System
 
@@ -189,6 +211,7 @@ class FeedSubscription(BaseModel):
     description: str
     last_updated: str
     is_active: bool = True
+    user_id: Optional[str] = None
 
 class Article(BaseModel):
     id: str
@@ -202,6 +225,7 @@ class Article(BaseModel):
     content: Optional[str] = None
     author: Optional[str] = None
     tags: Optional[List[str]] = []
+    user_id: Optional[str] = None
 
 class FeedCreate(BaseModel):
     url: str
@@ -215,6 +239,7 @@ class Document(BaseModel):
     upload_date: str
     content: Optional[str] = None
     status: str = "ready"  # 'uploading', 'processing', 'ready', 'error'
+    user_id: Optional[str] = None
 
 # Storage files
 FEEDS_FILE = "feed_subscriptions.json"
@@ -432,51 +457,35 @@ def refresh_all_feeds():
 
 # Feed API endpoints
 @app.get("/api/feeds", response_model=List[Article])
-def get_all_articles():
-    """Get all articles from active feeds only"""
-    articles = load_articles()
-    subscriptions = load_feed_subscriptions()
-    
-    # Get list of active feed IDs
-    active_feed_ids = {sub.id for sub in subscriptions if sub.is_active}
-    
-    # Filter articles to only include those from active feeds
-    active_articles = [article for article in articles if article.feed_id in active_feed_ids]
-    
-    # Sort by date descending
-    active_articles.sort(key=lambda x: x.date, reverse=True)
-    return active_articles
+def get_all_articles(current_user: dict = Depends(get_current_user)):
+    """Get all articles for the current user from active feeds"""
+    articles = hybrid_service.get_all_articles(user_id=current_user["id"])
+    articles.sort(key=lambda x: x.date, reverse=True)
+    return articles
 
 @app.get("/api/feeds/subscriptions", response_model=List[FeedSubscription])
-def get_feed_subscriptions():
-    """Get all feed subscriptions"""
-    return load_feed_subscriptions()
+def get_feed_subscriptions(current_user: dict = Depends(get_current_user)):
+    """Get all feed subscriptions for the current user"""
+    return hybrid_service.get_all_feed_subscriptions(user_id=current_user["id"])
 
 @app.post("/api/feeds", response_model=dict)
-def add_feed_subscription(feed_data: FeedCreate):
+def add_feed_subscription(feed_data: FeedCreate, current_user: dict = Depends(get_current_user)):
     """Add a new RSS feed subscription"""
     try:
         # Parse the RSS feed
         subscription, articles = parse_rss_feed(feed_data.url, feed_data.name)
         
-        # Check if feed already exists
-        existing_subscriptions = load_feed_subscriptions()
-        for existing in existing_subscriptions:
-            if existing.url == feed_data.url:
-                raise HTTPException(status_code=400, detail="Feed already exists")
-        
-        # Save subscription
-        existing_subscriptions.append(subscription)
-        save_feed_subscriptions(existing_subscriptions)
-        
-        # Save articles
-        existing_articles = load_articles()
-        existing_articles.extend(articles)
-        save_articles(existing_articles)
+        # Associate with user and persist via database-first hybrid service
+        subscription.user_id = current_user["id"]
+        for a in articles:
+            a.user_id = current_user["id"]
+        created_sub = hybrid_service.create_feed_subscription(subscription.dict())
+        for a in articles:
+            hybrid_service.create_article(a.dict())
         
         return {
             "message": "Feed added successfully",
-            "subscription": subscription,
+            "subscription": created_sub or subscription,
             "articles_count": len(articles)
         }
         
@@ -484,61 +493,49 @@ def add_feed_subscription(feed_data: FeedCreate):
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.delete("/api/feeds/subscriptions/{subscription_id}")
-def delete_feed_subscription(subscription_id: str):
+def delete_feed_subscription(subscription_id: str, current_user: dict = Depends(get_current_user)):
     """Delete a feed subscription and its articles"""
-    subscriptions = load_feed_subscriptions()
-    subscription = next((s for s in subscriptions if s.id == subscription_id), None)
-    
-    if not subscription:
-        raise HTTPException(status_code=404, detail="Feed subscription not found")
-    
-    # Remove subscription
-    subscriptions = [s for s in subscriptions if s.id != subscription_id]
-    save_feed_subscriptions(subscriptions)
-    
-    # Remove articles from this feed
-    articles = load_articles()
-    articles = [a for a in articles if a.feed_id != subscription_id]
-    save_articles(articles)
-    
+    # DB will enforce ownership with RLS; we return generic 200 on success
+    hybrid_service.delete_feed_subscription(subscription_id)
     return {"message": "Feed subscription deleted successfully"}
 
 @app.post("/api/feeds/subscriptions/{subscription_id}/toggle")
-def toggle_feed_subscription(subscription_id: str, toggle_data: dict):
+def toggle_feed_subscription(subscription_id: str, toggle_data: dict, current_user: dict = Depends(get_current_user)):
     """Toggle feed subscription active status"""
-    subscriptions = load_feed_subscriptions()
-    subscription = next((s for s in subscriptions if s.id == subscription_id), None)
-    
+    # Fetch, then update via database
+    subs = hybrid_service.get_all_feed_subscriptions(user_id=current_user["id"])
+    subscription = next((s for s in subs if s.id == subscription_id), None)
     if not subscription:
         raise HTTPException(status_code=404, detail="Feed subscription not found")
-    
-    # Update subscription status
     subscription.is_active = toggle_data.get('is_active', not subscription.is_active)
-    
-    # Save updated subscriptions
-    save_feed_subscriptions(subscriptions)
-    
+    hybrid_service.create_feed_subscription(subscription.dict())  # upsert behavior via hybrid path
     return {
         "message": f"Feed subscription {'activated' if subscription.is_active else 'deactivated'} successfully",
         "is_active": subscription.is_active
     }
 
 @app.post("/api/feeds/refresh")
-def refresh_feeds():
-    """Manually refresh all feeds"""
+def refresh_feeds(current_user: dict = Depends(get_current_user)):
+    """Manually refresh all feeds for the current user"""
     try:
-        articles = refresh_all_feeds()
-        return {
-            "message": "Feeds refreshed successfully",
-            "total_articles": len(articles)
-        }
+        # Re-parse each active feed for this user and store new articles
+        subscriptions = hybrid_service.get_all_feed_subscriptions(user_id=current_user["id"])
+        total = 0
+        for sub in [s for s in subscriptions if s.is_active]:
+            _, new_articles = parse_rss_feed(sub.url, sub.title)
+            for a in new_articles:
+                a.user_id = current_user["id"]
+                a.feed_id = sub.id
+                hybrid_service.create_article(a.dict())
+                total += 1
+        return {"message": "Feeds refreshed successfully", "total_articles": total}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to refresh feeds: {str(e)}")
 
 @app.get("/api/feeds/search/{query}")
-def search_articles(query: str):
-    """Search articles by title, content, or tags"""
-    articles = load_articles()
+def search_articles(query: str, current_user: dict = Depends(get_current_user)):
+    """Search articles by title, content, or tags for current user"""
+    articles = hybrid_service.get_all_articles(user_id=current_user["id"])
     query_lower = query.lower()
     
     matching_articles = []
@@ -553,24 +550,23 @@ def search_articles(query: str):
 
 # Document API endpoints
 @app.get("/api/documents", response_model=List[Document])
-def get_all_documents():
-    """Get all uploaded documents"""
-    documents = load_documents()
-    # Sort by upload_date descending
+def get_all_documents(current_user: dict = Depends(get_current_user)):
+    """Get all uploaded documents for the current user"""
+    documents = hybrid_service.get_all_documents(user_id=current_user["id"])
     documents.sort(key=lambda x: x.upload_date, reverse=True)
     return documents
 
 @app.get("/api/documents/{document_id}", response_model=Document)
-def get_document(document_id: str):
+def get_document(document_id: str, current_user: dict = Depends(get_current_user)):
     """Get a specific document"""
-    documents = load_documents()
+    documents = hybrid_service.get_all_documents(user_id=current_user["id"])
     document = next((d for d in documents if d.id == document_id), None)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     return document
 
 @app.post("/api/documents/upload", response_model=Document)
-def upload_document(file: UploadFile = File(...), name: str = Form(...)):
+def upload_document(file: UploadFile = File(...), name: str = Form(...), current_user: dict = Depends(get_current_user)):
     """Upload and process a document"""
     # Validate file type
     if file.content_type not in ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"]:
@@ -588,35 +584,31 @@ def upload_document(file: UploadFile = File(...), name: str = Form(...)):
         # Process the document
         document = process_document(file)
         
-        # Save to storage
-        documents = load_documents()
-        documents.append(document)
-        save_documents(documents)
-        
-        return document
+        # Persist via database-first hybrid service with user scoping
+        created = hybrid_service.create_document({
+            'name': document.name,
+            'type': document.type,
+            'size': document.size,
+            'content': document.content,
+            'status': document.status,
+            'user_id': current_user["id"]
+        })
+        return created or document
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/documents/{document_id}")
-def delete_document(document_id: str):
+def delete_document(document_id: str, current_user: dict = Depends(get_current_user)):
     """Delete a document"""
-    documents = load_documents()
-    document = next((d for d in documents if d.id == document_id), None)
-    
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    
-    # Remove document
-    documents = [d for d in documents if d.id != document_id]
-    save_documents(documents)
-    
+    # DB will enforce ownership; return generic message
+    hybrid_service.delete_document(document_id)
     return {"message": "Document deleted successfully"}
 
 @app.get("/api/documents/search/{query}")
-def search_documents(query: str):
+def search_documents(query: str, current_user: dict = Depends(get_current_user)):
     """Search documents by name or content"""
-    documents = load_documents()
+    documents = hybrid_service.get_all_documents(user_id=current_user["id"])
     query_lower = query.lower()
     
     matching_documents = []
@@ -890,9 +882,9 @@ class ChatRequest(BaseModel):
     conversation_history: List[dict] = []
 
 @app.post("/api/chat")
-async def chat_with_ai(request: ChatRequest):
+async def chat_with_ai(request: ChatRequest, current_user: dict = Depends(get_current_user)):
     """
-    Simple AI chat endpoint using Groq API directly
+    AI chat endpoint with access to user's notes/journals for context
     """
     try:
         from langchain_groq import ChatGroq
@@ -904,8 +896,30 @@ async def chat_with_ai(request: ChatRequest):
             groq_api_key=os.getenv("GROQ_API_KEY"),
         )
         
+        # Fetch user's journal entries for context
+        notes_context = ""
+        try:
+            journals = hybrid_service.get_all_journals(user_id=current_user["id"])
+            if journals:
+                # Include recent notes (last 5 entries, truncated)
+                recent_notes = journals[:5]
+                notes_summary = "\n".join([
+                    f"- {entry.title}: {entry.content[:200]}..." if len(entry.content) > 200 else f"- {entry.title}: {entry.content}"
+                    for entry in recent_notes
+                ])
+                notes_context = f"\n\nYou have access to the user's notes/journal entries. Here are their recent notes:\n{notes_summary}\n"
+        except Exception as e:
+            print(f"Error fetching notes for context: {e}")
+            notes_context = ""
+        
         # Build conversation context
-        conversation_context = "You are a helpful AI assistant. You can help with general questions, explanations, creative tasks, and casual conversation. Be friendly, informative, and concise.\n\n"
+        conversation_context = "You are a helpful AI assistant for ReadNest, a reading and research platform. You can help with general questions, explanations, creative tasks, and casual conversation. " + \
+                              "You also have access to the user's notes and journal entries, which you can reference when relevant to answer their questions." + \
+                              "Be friendly, informative, and concise.\n\n"
+        
+        # Add notes context if available
+        if notes_context:
+            conversation_context += notes_context
         
         # Add conversation history (last 10 messages)
         for msg in request.conversation_history[-10:]:
@@ -927,3 +941,51 @@ async def chat_with_ai(request: ChatRequest):
         tb = traceback.format_exc()
         print("chat endpoint error:", tb)
         raise HTTPException(status_code=500, detail=str(e))
+
+# Auth endpoints (Supabase)
+@app.post("/auth/register")
+def register_user(payload: RegisterRequest):
+    try:
+        res = supabase.auth.sign_up({
+            "email": payload.email,
+            "password": payload.password
+        })
+        return {
+            "user": {"id": res.user.id, "email": res.user.email} if res.user else None,
+            "session": {
+                "access_token": getattr(res.session, "access_token", None),
+                "refresh_token": getattr(res.session, "refresh_token", None)
+            } if res.session else None
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/auth/login")
+def login_user(payload: LoginRequest):
+    try:
+        res = supabase.auth.sign_in_with_password({
+            "email": payload.email,
+            "password": payload.password
+        })
+        if not res.session:
+            raise HTTPException(status_code=400, detail="Invalid credentials")
+        return {
+            "access_token": res.session.access_token,
+            "refresh_token": res.session.refresh_token,
+            "user": {"id": res.user.id, "email": res.user.email} if res.user else None
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/auth/logout")
+def logout_user():
+    # Stateless API: client should discard its token. This endpoint exists for symmetry.
+    try:
+        # Attempt to sign out (no-op without a persisted session in this server)
+        try:
+            supabase.auth.sign_out()
+        except Exception:
+            pass
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))

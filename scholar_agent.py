@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 # Groq client wrapper (langchain_groq)
 from langchain_groq import ChatGroq
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from langgraph.graph import StateGraph, END
 
 load_dotenv()  # loads GROQ_API_KEY, optional GROQ_MODEL
