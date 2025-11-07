@@ -1,3 +1,119 @@
+# main.py
+from fastapi import FastAPI, Request, Form
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
+from pydantic import BaseModel
+import feedparser
+import os
+import json
+from datetime import datetime
+import hashlib
+import bleach
+from pathlib import Path
+
+DATA_DIR = Path.cwd() / "data"
+FEEDS_FILE = DATA_DIR / "feeds.json"
+
+app = FastAPI(title="ReadNest RSS Ingest (dev)")
+
+# Ensure data dir + file exist
+def ensure_data_file():
+    DATA_DIR.mkdir(exist_ok=True)
+    if not FEEDS_FILE.exists():
+        FEEDS_FILE.write_text(json.dumps({"feeds": []}, indent=2), encoding="utf-8")
+
+def read_db():
+    ensure_data_file()
+    return json.loads(FEEDS_FILE.read_text(encoding="utf-8"))
+
+def write_db(obj):
+    tmp = FEEDS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+    tmp.replace(FEEDS_FILE)
+
+def hash_url(url: str) -> str:
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
+
+def sanitize_html(html: str) -> str:
+    # Bleach to allow a conservative set of tags; keep it safe.
+    allowed_tags = ["p","br","strong","em","ul","ol","li","a","blockquote","code","pre"]
+    allowed_attrs = {"a":["href","title","rel"], "img":["src","alt"]}
+    return bleach.clean(html or "", tags=allowed_tags, attributes=allowed_attrs, strip=True)
+
+class IngestPayload(BaseModel):
+    url: str
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    # serve the simple prompt UI
+    html = (Path(__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+    return HTMLResponse(content=html)
+
+@app.post("/api/ingest-rss")
+async def ingest_rss(payload: IngestPayload):
+    url = payload.url.strip()
+    if not url:
+        return JSONResponse({"error": "missing url"}, status_code=400)
+
+    try:
+        parsed = feedparser.parse(url)
+    except Exception as e:
+        return JSONResponse({"error": "failed to fetch or parse feed", "details": str(e)}, status_code=500)
+
+    if parsed.bozo and not parsed.entries:
+        # bozo flag indicates parse issues; still try to be helpful
+        return JSONResponse({"error": "invalid RSS/Atom or unreachable", "details": getattr(parsed, 'bozo_exception', str(parsed))}, status_code=400)
+
+    items = []
+    for it in parsed.entries:
+        content = ""
+        # prefer content:encoded or content
+        if "content" in it and isinstance(it.content, list) and len(it.content) > 0:
+            content = it.content[0].value
+        elif "summary" in it:
+            content = it.summary
+        elif "description" in it:
+            content = it.description
+
+        items.append({
+            "guid": it.get("id") or it.get("guid") or None,
+            "title": bleach.clean(it.get("title","Untitled"), strip=True),
+            "link": it.get("link"),
+            "content": sanitize_html(content),
+            "published": it.get("published") or it.get("updated") or None,
+            "isoDate": it.get("published_parsed") and datetime(*it.published_parsed[:6]).isoformat() if it.get("published_parsed") else None,
+            "author": it.get("author") or it.get("creator") or None
+        })
+
+    stored_feed = {
+        "id": hash_url(url),
+        "url": url,
+        "title": parsed.feed.get("title") if parsed.feed else None,
+        "fetchedAt": datetime.utcnow().isoformat() + "Z",
+        "items": items
+    }
+
+    db = read_db()
+    # replace by id (url hash) if exists
+    existing_idx = next((i for i,f in enumerate(db["feeds"]) if f["id"] == stored_feed["id"]), None)
+    if existing_idx is not None:
+        db["feeds"][existing_idx] = stored_feed
+    else:
+        db["feeds"].append(stored_feed)
+
+    write_db(db)
+    return {"ok": True, "storedCount": len(items), "feedTitle": stored_feed["title"]}
+
+@app.get("/api/feeds")
+async def list_feeds():
+    return read_db()
+
+@app.get("/api/feeds/{feed_id}")
+async def get_feed(feed_id: str):
+    db = read_db()
+    feed = next((f for f in db["feeds"] if f["id"] == feed_id), None)
+    if not feed:
+        return JSONResponse({"error":"not found"}, status_code=404)
+    return feed
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -626,11 +742,27 @@ async def search_papers(q: str = Query(...), top_k: int = 5, source: str = "sema
     Sources: semantic_scholar, openalex, arxiv, pubmed
     """
     results = []
+
+    # Helper to normalize date strings for sorting
+    def to_sortable_date(date_str: str):
+        try:
+            if not date_str:
+                return None
+            # Try full ISO date first
+            if len(date_str) >= 10 and date_str[4] == '-' and date_str[7] == '-':
+                return datetime.fromisoformat(date_str[:10])
+            # Try year-only
+            if len(date_str) == 4 and date_str.isdigit():
+                return datetime(int(date_str), 1, 1)
+            # Fallback: attempt generic parse of leading date
+            return datetime.fromisoformat(date_str.split('T')[0])
+        except Exception:
+            return None
     
     if source == "semantic_scholar" or source == "all":
         # Semantic Scholar API
         try:
-            url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={q}&limit={top_k}&fields=title,url,abstract"
+            url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={q}&limit={top_k}&fields=title,url,abstract,year,publicationDate"
             async with httpx.AsyncClient() as client:
                 r = await client.get(url)
                 if r.status_code == 200:
@@ -639,11 +771,15 @@ async def search_papers(q: str = Query(...), top_k: int = 5, source: str = "sema
                         abstract = paper.get("abstract") or ""
                         title = paper.get("title") or "Untitled"
                         link = paper.get("url") or ""
+                        year = paper.get("year")
+                        pub_date = paper.get("publicationDate")  # ISO date string if provided
+                        normalized_date = pub_date or (str(year) if year else "")
                         results.append({
                             "title": title,
                             "summary": abstract[:500],
                             "link": link,
-                            "source": "Semantic Scholar"
+                            "source": "Semantic Scholar",
+                            "date": normalized_date
                         })
         except Exception as e:
             print(f"Semantic Scholar error: {e}")
@@ -712,7 +848,8 @@ async def search_papers(q: str = Query(...), top_k: int = 5, source: str = "sema
                             "title": enhanced_title,
                             "summary": abstract_text[:500] if abstract_text else "No abstract available",
                             "link": link,
-                            "source": "OpenAlex"
+                            "source": "OpenAlex",
+                            "date": str(pub_year) if pub_year else ""
                         })
                 else:
                     print(f"OpenAlex error: {r.status_code} - {r.text}")
@@ -764,8 +901,10 @@ async def search_papers(q: str = Query(...), top_k: int = 5, source: str = "sema
                         published_elem = entry.find('.//{http://www.w3.org/2005/Atom}published')
                         pub_date = ""
                         if published_elem is not None and published_elem.text:
-                            pub_date = published_elem.text[:4]  # Extract year
-                        year_suffix = f" ({pub_date})" if pub_date else ""
+                            # Prefer full date (YYYY-MM-DD) if present
+                            full_date = published_elem.text[:10]
+                            pub_date = full_date
+                        year_suffix = f" ({pub_date[:4]})" if pub_date else ""
                         
                         # Get authors
                         authors = []
@@ -782,7 +921,8 @@ async def search_papers(q: str = Query(...), top_k: int = 5, source: str = "sema
                             "title": title + year_suffix + author_text,
                             "summary": summary[:500],
                             "link": link,
-                            "source": "arXiv"
+                            "source": "arXiv",
+                            "date": pub_date
                         })
                 else:
                     print(f"arXiv error: {r.status_code} - {r.text}")
@@ -829,21 +969,35 @@ async def search_papers(q: str = Query(...), top_k: int = 5, source: str = "sema
                                 pmid = pmid_elem.text if pmid_elem is not None else ""
                                 link = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else ""
                                 
-                                # Get publication year
+                                # Get publication date (best-effort)
                                 year_elem = article.find('.//PubDate/Year')
+                                month_elem = article.find('.//PubDate/Month')
+                                day_elem = article.find('.//PubDate/Day')
                                 pub_year = year_elem.text if year_elem is not None else ""
+                                # Normalize month text (could be Jan/01/etc.)
+                                month = month_elem.text if month_elem is not None else "01"
+                                day = day_elem.text if day_elem is not None else "01"
+                                # Map short month names to numbers
+                                month_map = {"Jan":"01","Feb":"02","Mar":"03","Apr":"04","May":"05","Jun":"06","Jul":"07","Aug":"08","Sep":"09","Oct":"10","Nov":"11","Dec":"12"}
+                                month_norm = month_map.get(month, month.zfill(2)) if pub_year else ""
+                                pub_date = f"{pub_year}-{month_norm}-{day.zfill(2)}" if pub_year else ""
                                 year_suffix = f" ({pub_year})" if pub_year else ""
                                 
                                 results.append({
                                     "title": title + year_suffix,
                                     "summary": abstract[:500],
                                     "link": link,
-                                    "source": "PubMed"
+                                    "source": "PubMed",
+                                    "date": pub_date or (pub_year or "")
                                 })
         except Exception as e:
             print(f"PubMed error: {e}")
             import traceback
             traceback.print_exc()
+
+    # Sort results by date descending (newest first); items without date go last
+    results.sort(key=lambda r: (to_sortable_date(r.get("date")) is None, to_sortable_date(r.get("date")) or datetime.min), reverse=False)
+    results.reverse()
 
     return {"results": results}
 

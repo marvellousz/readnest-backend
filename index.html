@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>ReadNest — Add RSS</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; padding: 40px; }
+    input[type="url"] { width: 400px; padding: 8px; }
+    button { padding: 8px 12px; }
+    .status { margin-top: 12px; color: #333; }
+  </style>
+</head>
+<body>
+  <h2>Add RSS feed</h2>
+  <form id="f">
+    <input id="url" type="url" placeholder="https://example.com/feed.xml" required />
+    <button type="submit">Add feed</button>
+  </form>
+  <div id="status" class="status"></div>
+
+  <script>
+    document.getElementById('f').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const url = document.getElementById('url').value.trim();
+      const status = document.getElementById('status');
+      status.textContent = "Submitting...";
+      try {
+        const res = await fetch('/api/ingest-rss', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({url})
+        });
+        const j = await res.json();
+        if (res.ok) {
+          status.textContent = `OK — stored ${j.storedCount} items from: ${j.feedTitle || url}`;
+        } else {
+          status.textContent = `Error: ${j.error || JSON.stringify(j)}`;
+        }
+      } catch (err) {
+        status.textContent = 'Network error: ' + err;
+      }
+    });
+  </script>
+</body>
+</html>
