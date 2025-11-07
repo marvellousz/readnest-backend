@@ -626,11 +626,27 @@ async def search_papers(q: str = Query(...), top_k: int = 5, source: str = "sema
     Sources: semantic_scholar, openalex, arxiv, pubmed
     """
     results = []
+
+    # Helper to normalize date strings for sorting
+    def to_sortable_date(date_str: str):
+        try:
+            if not date_str:
+                return None
+            # Try full ISO date first
+            if len(date_str) >= 10 and date_str[4] == '-' and date_str[7] == '-':
+                return datetime.fromisoformat(date_str[:10])
+            # Try year-only
+            if len(date_str) == 4 and date_str.isdigit():
+                return datetime(int(date_str), 1, 1)
+            # Fallback: attempt generic parse of leading date
+            return datetime.fromisoformat(date_str.split('T')[0])
+        except Exception:
+            return None
     
     if source == "semantic_scholar" or source == "all":
         # Semantic Scholar API
         try:
-            url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={q}&limit={top_k}&fields=title,url,abstract"
+            url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={q}&limit={top_k}&fields=title,url,abstract,year,publicationDate"
             async with httpx.AsyncClient() as client:
                 r = await client.get(url)
                 if r.status_code == 200:
@@ -639,11 +655,15 @@ async def search_papers(q: str = Query(...), top_k: int = 5, source: str = "sema
                         abstract = paper.get("abstract") or ""
                         title = paper.get("title") or "Untitled"
                         link = paper.get("url") or ""
+                        year = paper.get("year")
+                        pub_date = paper.get("publicationDate")  # ISO date string if provided
+                        normalized_date = pub_date or (str(year) if year else "")
                         results.append({
                             "title": title,
                             "summary": abstract[:500],
                             "link": link,
-                            "source": "Semantic Scholar"
+                            "source": "Semantic Scholar",
+                            "date": normalized_date
                         })
         except Exception as e:
             print(f"Semantic Scholar error: {e}")
@@ -712,7 +732,8 @@ async def search_papers(q: str = Query(...), top_k: int = 5, source: str = "sema
                             "title": enhanced_title,
                             "summary": abstract_text[:500] if abstract_text else "No abstract available",
                             "link": link,
-                            "source": "OpenAlex"
+                            "source": "OpenAlex",
+                            "date": str(pub_year) if pub_year else ""
                         })
                 else:
                     print(f"OpenAlex error: {r.status_code} - {r.text}")
@@ -764,8 +785,10 @@ async def search_papers(q: str = Query(...), top_k: int = 5, source: str = "sema
                         published_elem = entry.find('.//{http://www.w3.org/2005/Atom}published')
                         pub_date = ""
                         if published_elem is not None and published_elem.text:
-                            pub_date = published_elem.text[:4]  # Extract year
-                        year_suffix = f" ({pub_date})" if pub_date else ""
+                            # Prefer full date (YYYY-MM-DD) if present
+                            full_date = published_elem.text[:10]
+                            pub_date = full_date
+                        year_suffix = f" ({pub_date[:4]})" if pub_date else ""
                         
                         # Get authors
                         authors = []
@@ -782,7 +805,8 @@ async def search_papers(q: str = Query(...), top_k: int = 5, source: str = "sema
                             "title": title + year_suffix + author_text,
                             "summary": summary[:500],
                             "link": link,
-                            "source": "arXiv"
+                            "source": "arXiv",
+                            "date": pub_date
                         })
                 else:
                     print(f"arXiv error: {r.status_code} - {r.text}")
@@ -829,21 +853,35 @@ async def search_papers(q: str = Query(...), top_k: int = 5, source: str = "sema
                                 pmid = pmid_elem.text if pmid_elem is not None else ""
                                 link = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else ""
                                 
-                                # Get publication year
+                                # Get publication date (best-effort)
                                 year_elem = article.find('.//PubDate/Year')
+                                month_elem = article.find('.//PubDate/Month')
+                                day_elem = article.find('.//PubDate/Day')
                                 pub_year = year_elem.text if year_elem is not None else ""
+                                # Normalize month text (could be Jan/01/etc.)
+                                month = month_elem.text if month_elem is not None else "01"
+                                day = day_elem.text if day_elem is not None else "01"
+                                # Map short month names to numbers
+                                month_map = {"Jan":"01","Feb":"02","Mar":"03","Apr":"04","May":"05","Jun":"06","Jul":"07","Aug":"08","Sep":"09","Oct":"10","Nov":"11","Dec":"12"}
+                                month_norm = month_map.get(month, month.zfill(2)) if pub_year else ""
+                                pub_date = f"{pub_year}-{month_norm}-{day.zfill(2)}" if pub_year else ""
                                 year_suffix = f" ({pub_year})" if pub_year else ""
                                 
                                 results.append({
                                     "title": title + year_suffix,
                                     "summary": abstract[:500],
                                     "link": link,
-                                    "source": "PubMed"
+                                    "source": "PubMed",
+                                    "date": pub_date or (pub_year or "")
                                 })
         except Exception as e:
             print(f"PubMed error: {e}")
             import traceback
             traceback.print_exc()
+
+    # Sort results by date descending (newest first); items without date go last
+    results.sort(key=lambda r: (to_sortable_date(r.get("date")) is None, to_sortable_date(r.get("date")) or datetime.min), reverse=False)
+    results.reverse()
 
     return {"results": results}
 
