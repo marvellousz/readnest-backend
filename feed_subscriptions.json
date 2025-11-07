@@ -1,0 +1,34 @@
+[
+  {
+    "id": "feed_1757357885_c9371ecf",
+    "url": "http://feeds.bbci.co.uk/news/technology/rss.xml",
+    "title": "BBC News",
+    "description": "BBC News - Technology",
+    "last_updated": "2025-10-29T15:41:52.965287",
+    "is_active": true
+  },
+  {
+    "id": "feed_1757362848_f5c58bdf",
+    "url": "https://natashatherobot.preternatural.blog/rss",
+    "title": "Preternaturnal Blog",
+    "description": "undefined",
+    "last_updated": "2025-10-29T15:42:10.628678",
+    "is_active": true
+  },
+  {
+    "id": "feed_1757414835_b3f62069",
+    "url": "https://transferlab.ai/index.xml",
+    "title": "mine",
+    "description": "All updates by the TransferLab team",
+    "last_updated": "2025-10-29T15:42:11.379658",
+    "is_active": true
+  },
+  {
+    "id": "feed_1757481301_3d07eb12",
+    "url": "http://feeds.bbci.co.uk/sport/cricket/rss.xml",
+    "title": "BBC Sport",
+    "description": "BBC Sport - Cricket",
+    "last_updated": "2025-10-29T15:42:12.505371",
+    "is_active": true
+  }
+]
