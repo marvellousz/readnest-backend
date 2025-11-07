@@ -1,4 +1,4 @@
-# readNest backend
+# readnest backend
 
 A powerful FastAPI backend for ReadNest, providing RESTful APIs for journaling, RSS feed aggregation, document processing, and academic research integration.
 
